@@ -12,27 +12,22 @@ from google import genai
 from google.genai import types
 from supabase import create_client
 
+# Stream logs immediately in GitHub Actions
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 MODEL_NAME = "gemini-3.8-flash"
 FORCE_SYNC = "--force" in sys.argv
+REQUEST_TIMEOUT = (6, 12)  # (connect_timeout, read_timeout) in seconds
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Continuous grocery store targets
 TARGET_URLS = {
-    "keells_promotions": "https://www.keellssuper.com/keells-promotions",
-    "cargills_deals_of_month": (
-        "https://cargillsonline.com/Product/Deals-of-the-Month"
-        "?CI=MjUwOA==&CN=RGVhbHMgb2YgIHRoZSBNb250aA==&SI=MTA2NQ==&ST=QmFubmVy&DT=Q29sbGVjdGlvbg=="
-    ),
-    "cargills_mega_discount": (
-        "https://cargillsonline.com/Product/Mega-Discount"
-        "?CI=MzYyMw==&CN=TWVnYSBEaXNjb3VudA==&SI=MTA3Nw==&ST=QmFubmVy&DT=Q29sbGVjdGlvbg=="
-    ),
     "mypromo_laugfs": "https://www.mypromo.lk/laugfssupermarket/promotions",
     "spar_offers_promotions": "https://spar2u.lk/collections/offers-promotions",
     "mypromo_arpico": "https://www.mypromo.lk/arpico/promotions",
@@ -44,7 +39,6 @@ TARGET_URLS = {
     ),
 }
 
-# Continuous official bank supermarket card offer targets
 BANK_OFFER_URLS = [
     ("ComBank", "https://www.combank.lk/rewards-promotions"),
     ("Sampath", "https://www.sampath.lk/sampath-cards/credit-card-offer?firstTab=super_markets"),
@@ -100,39 +94,18 @@ BANK_CODE_MAP = {
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
-def fetch_with_retry(url: str, timeout: int = 25) -> requests.Response:
-    """Fetches a URL with polite backoff if rate-limited (HTTP 429)."""
-    for attempt in range(3):
-        resp = requests.get(url, headers=HEADERS, timeout=timeout)
-        if resp.status_code != 429:
-            resp.raise_for_status()
-            return resp
-        wait_sec = 5 * (attempt + 1)
-        print(f"Rate limited (429) on {url}, waiting {wait_sec}s...")
-        time.sleep(wait_sec)
+def fetch_fast(url: str) -> requests.Response:
+    """Fetches a URL with strict connect/read timeouts and 1 quick retry on 429."""
+    resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    if resp.status_code == 429:
+        print(f"Rate limited (429) on {url}, waiting 4s...")
+        time.sleep(4)
+        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp
 
 
-def fetch_rendered_html(url: str, wait_ms: int = 4500) -> str:
-    """Renders JS-heavy pages via Playwright if available, otherwise falls back to requests."""
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, wait_until="networkidle", timeout=35000)
-            page.wait_for_timeout(wait_ms)
-            content = page.content()
-            browser.close()
-            return content
-    except Exception:
-        resp = fetch_with_retry(url, timeout=25)
-        return resp.text
-
-
-def clean_html_text(html: str, max_chars: int = 22000) -> str:
+def clean_html_text(html: str, max_chars: int = 20000) -> str:
     """Strips scripts, styles, and nav noise from HTML."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg", "footer", "nav"]):
@@ -146,8 +119,7 @@ def extract_active_days(text: str) -> list[str]:
     lower = (text or "").lower()
     if "daily" in lower or "every day" in lower:
         return list(WEEKDAYS)
-    days = [d for d in WEEKDAYS if d.lower() in lower]
-    return days if days else []
+    return [d for d in WEEKDAYS if d.lower() in lower]
 
 
 def ingest_official_bank_pages() -> None:
@@ -155,15 +127,16 @@ def ingest_official_bank_pages() -> None:
     default_valid = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
 
     for bank_name, url in BANK_OFFER_URLS:
+        print(f"[{bank_name}] Checking {url}...")
         try:
-            html = fetch_rendered_html(url)
+            resp = fetch_fast(url)
         except Exception as exc:
-            print(f"[{bank_name}] Failed to fetch {url}: {exc}")
+            print(f"[{bank_name}] Skipping {url}: {exc}")
             continue
 
-        text = clean_html_text(html, max_chars=22000)
+        text = clean_html_text(resp.text, max_chars=20000)
         if not text or len(text) < 120:
-            print(f"[{bank_name}] Empty content from {url}, skipping.")
+            print(f"[{bank_name}] Empty or JS-blocked content from {url}, skipping.")
             continue
 
         if not ai_client:
@@ -228,23 +201,24 @@ def ingest_official_bank_pages() -> None:
         if rows:
             supabase.table("bank_promotions").delete().eq("source_url", url).execute()
             supabase.table("bank_promotions").insert(rows).execute()
-            print(f"[{bank_name}] Synced {len(rows)} supermarket promos from {url}.")
+            print(f"[{bank_name}] Synced {len(rows)} supermarket promos.")
 
 
 def ingest_spar_offers_promotions() -> None:
     """Continuously checks https://spar2u.lk/collections/offers-promotions."""
     base_url = TARGET_URLS["spar_offers_promotions"]
+    print(f"[SPAR] Checking {base_url}...")
     seen_handles = set()
     now_iso = datetime.now(timezone.utc).isoformat()
     valid_until = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat()
     rows = []
 
-    for page_num in range(1, 4):
+    for page_num in range(1, 3):
         json_url = f"{base_url}/products.json?limit=250&page={page_num}"
         if page_num > 1:
-            time.sleep(2.5)
+            time.sleep(2)
         try:
-            resp = fetch_with_retry(json_url, timeout=20)
+            resp = fetch_fast(json_url)
             products = resp.json().get("products", [])
         except Exception as exc:
             print(f"[SPAR] JSON page {page_num} warning: {exc}")
@@ -291,10 +265,11 @@ def ingest_spar_offers_promotions() -> None:
 def ingest_glomark_deal_page() -> None:
     """Continuously checks Softlogic Glomark deal-page."""
     url = TARGET_URLS["glomark_deal_page"]
+    print(f"[Glomark] Checking {url}...")
     try:
-        resp = fetch_with_retry(url, timeout=25)
+        resp = fetch_fast(url)
     except Exception as exc:
-        print(f"[Glomark] Failed to fetch {url}: {exc}")
+        print(f"[Glomark] Skipping {url}: {exc}")
         return
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -370,10 +345,11 @@ def ingest_mypromo_store_pages() -> None:
     bank_rows = []
 
     for store_name, url in mypromo_targets:
+        print(f"[MyPromo-{store_name}] Checking {url}...")
         try:
-            resp = fetch_with_retry(url, timeout=25)
+            resp = fetch_fast(url)
         except Exception as exc:
-            print(f"[MyPromo-{store_name}] Failed to fetch {url}: {exc}")
+            print(f"[MyPromo-{store_name}] Skipping {url}: {exc}")
             continue
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -435,6 +411,7 @@ def ingest_mypromo_store_pages() -> None:
 
 def ingest_sathosa_prices() -> None:
     """Checks Lanka Sathosa prices via RSS + official press releases."""
+    print("[Sathosa] Checking RSS & price releases...")
     rss_url = (
         "https://news.google.com/rss/search"
         "?q=%22Lanka+Sathosa%22+(reduces+OR+price)+Sri+Lanka&hl=en-LK&gl=LK&ceid=LK:en"
@@ -445,7 +422,7 @@ def ingest_sathosa_prices() -> None:
     article_urls = []
 
     try:
-        rss_resp = fetch_with_retry(rss_url, timeout=20)
+        rss_resp = fetch_fast(rss_url)
         root = ET.fromstring(rss_resp.content)
         for item in root.findall("./channel/item")[:3]:
             link = item.findtext("link") or ""
@@ -464,7 +441,7 @@ def ingest_sathosa_prices() -> None:
 
     for link in article_urls:
         try:
-            art_resp = requests.get(link, headers=HEADERS, timeout=25, allow_redirects=True)
+            art_resp = requests.get(link, headers=HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True)
             if not art_resp.ok:
                 continue
             text = clean_html_text(art_resp.text, max_chars=15000)
@@ -502,10 +479,11 @@ def ingest_sathosa_prices() -> None:
 
 
 if __name__ == "__main__":
-    print(f"Starting full supermarket & official bank sync at {datetime.now(timezone.utc).isoformat()}")
+    start = time.time()
+    print(f"Starting sync at {datetime.now(timezone.utc).isoformat()}")
     ingest_spar_offers_promotions()
     ingest_glomark_deal_page()
     ingest_mypromo_store_pages()
     ingest_official_bank_pages()
     ingest_sathosa_prices()
-    print("Sync complete.")
+    print(f"Sync complete in {time.time() - start:.1f}s.")
