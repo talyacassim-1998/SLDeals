@@ -25,3 +25,11 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python -u ingest_deals.py
+      - name: Keep scheduled workflow active
+        run: |
+          date -u +"Last synced: %Y-%m-%dT%H:%M:%SZ" > last_sync.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_sync.txt
+          git diff --staged --quiet || git commit -m "chore: update sync heartbeat [skip ci]"
+          git push
