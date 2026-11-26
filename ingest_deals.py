@@ -302,8 +302,8 @@ def ingest_glomark_deal_page() -> None:
         raw_line = lines[i + offset]
         item_name = re.sub(r"\s*-\s*in Sri Lanka$", "", raw_line, flags=re.IGNORECASE).strip()
         block = " ".join(lines[i + offset : min(i + offset + 8, len(lines))])
-        if "OUT OF STOCK" in block.upper() or item_name in seen_names or len(item_name) < 3:
-            continue
+        if "OUT OF STOCK" in block.upper() or item_name in seen_names or len(item_name) < 3 or item_name.replace("%", "").strip().isdigit():
+    continue
 
         prices = re.findall(r"Rs\.?\s*([0-9,]+(?:\.\d{2})?)", block)
         if not prices:
