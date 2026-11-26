@@ -491,4 +491,4 @@ if __name__ == "__main__":
     ingest_mypromo_store_pages()
     ingest_sathosa_prices()
     ingest_official_bank_pages()
-    print(f"Sync complete in {time.time() - start:.1f}s.")
+    print("Starting sync...")
