@@ -131,7 +131,12 @@ def ingest_official_bank_pages() -> None:
         try:
             resp = fetch_fast(url)
         except Exception as exc:
-            print(f"[{bank_name}] Skipping {url}: {exc}")
+            print(f"[{bank_name}] Gemini parse error on {url}: {exc}")
+            if "503" in str(exc) or "UNAVAILABLE" in str(exc):
+                consecutive_503 += 1
+                if consecutive_503 >= 2:
+                    print("[BankPages] Gemini is overloaded (503). Stopping bank checks early.")
+                    break
             continue
 
         text = clean_html_text(resp.text, max_chars=20000)
@@ -480,10 +485,10 @@ def ingest_sathosa_prices() -> None:
 
 if __name__ == "__main__":
     start = time.time()
-    print(f"Starting sync at {datetime.now(timezone.utc).isoformat()}")
+    print(f"Starting sync at {[invalid URL](timezone.utc).isoformat()}")
     ingest_spar_offers_promotions()
     ingest_glomark_deal_page()
     ingest_mypromo_store_pages()
-    ingest_official_bank_pages()
     ingest_sathosa_prices()
+    ingest_official_bank_pages()
     print(f"Sync complete in {time.time() - start:.1f}s.")
