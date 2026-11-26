@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -12,7 +13,6 @@ from google import genai
 from google.genai import types
 from supabase import create_client
 
-# Stream logs immediately in GitHub Actions
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -22,7 +22,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 MODEL_NAME = "gemini-3.8-flash"
 FORCE_SYNC = "--force" in sys.argv
-REQUEST_TIMEOUT = (6, 12)  # (connect_timeout, read_timeout) in seconds
+REQUEST_TIMEOUT = (5, 10)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -94,8 +94,34 @@ BANK_CODE_MAP = {
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
+def is_source_changed(source_key: str, raw_bytes: bytes) -> bool:
+    if FORCE_SYNC:
+        return True
+    new_hash = hashlib.md5(raw_bytes).hexdigest()
+    try:
+        existing = (
+            supabase.table("scraper_state")
+            .select("content_hash")
+            .eq("source_key", source_key)
+            .execute()
+        )
+        return not ([invalid URL] and [invalid URL][0]["content_hash"] == new_hash)
+    except Exception:
+        return True
+
+
+def mark_source_synced(source_key: str, raw_bytes: bytes) -> None:
+    new_hash = hashlib.md5(raw_bytes).hexdigest()
+    supabase.table("scraper_state").upsert(
+        {
+            "source_key": source_key,
+            "content_hash": new_hash,
+            "updated_at": [invalid URL](timezone.utc).isoformat(),
+        }
+    ).execute()
+
+
 def fetch_fast(url: str) -> requests.Response:
-    """Fetches a URL with strict connect/read timeouts and 1 quick retry on 429."""
     resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     if resp.status_code == 429:
         print(f"Rate limited (429) on {url}, waiting 4s...")
@@ -106,7 +132,6 @@ def fetch_fast(url: str) -> requests.Response:
 
 
 def clean_html_text(html: str, max_chars: int = 20000) -> str:
-    """Strips scripts, styles, and nav noise from HTML."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg", "footer", "nav"]):
         tag.decompose()
@@ -115,16 +140,36 @@ def clean_html_text(html: str, max_chars: int = 20000) -> str:
 
 
 def extract_active_days(text: str) -> list[str]:
-    """Maps offer text to standardized weekday array for the 7-day calendar & Checkout Mode."""
     lower = (text or "").lower()
     if "daily" in lower or "every day" in lower:
         return list(WEEKDAYS)
     return [d for d in WEEKDAYS if d.lower() in lower]
 
 
+def generate_json_with_retry(prompt: str, max_attempts: int = 3) -> list[dict]:
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            response = ai_client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            return json.loads(response.text)
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            if ("503" in msg or "429" in msg or "UNAVAILABLE" in msg) and attempt < max_attempts - 1:
+                wait_sec = 4 * (attempt + 1)
+                print(f"Gemini busy, retrying in {wait_sec}s...")
+                time.sleep(wait_sec)
+                continue
+            raise last_exc
+    return []
+
+
 def ingest_official_bank_pages() -> None:
-    """Continuously checks all 11 official Sri Lankan bank supermarket offer pages."""
-    default_valid = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
+    default_valid = ([invalid URL](timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
 
     for bank_name, url in BANK_OFFER_URLS:
         print(f"[{bank_name}] Checking {url}...")
@@ -137,6 +182,11 @@ def ingest_official_bank_pages() -> None:
         text = clean_html_text(resp.text, max_chars=20000)
         if not text or len(text) < 120:
             print(f"[{bank_name}] Empty or JS-blocked content from {url}, skipping.")
+            continue
+
+        source_key = f"bank_page_{url}"
+        if not is_source_changed(source_key, text.encode("utf-8")):
+            print(f"[{bank_name}] Page unchanged, skipping Gemini call.")
             continue
 
         if not ai_client:
@@ -165,12 +215,7 @@ def ingest_official_bank_pages() -> None:
         """
 
         try:
-            response = ai_client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
-            )
-            promos = json.loads(response.text)
+            promos = generate_json_with_retry(prompt)
         except Exception as exc:
             print(f"[{bank_name}] Gemini parse error on {url}: {exc}")
             continue
@@ -202,15 +247,15 @@ def ingest_official_bank_pages() -> None:
             supabase.table("bank_promotions").delete().eq("source_url", url).execute()
             supabase.table("bank_promotions").insert(rows).execute()
             print(f"[{bank_name}] Synced {len(rows)} supermarket promos.")
+        mark_source_synced(source_key, text.encode("utf-8"))
 
 
 def ingest_spar_offers_promotions() -> None:
-    """Continuously checks https://spar2u.lk/collections/offers-promotions."""
     base_url = TARGET_URLS["spar_offers_promotions"]
     print(f"[SPAR] Checking {base_url}...")
     seen_handles = set()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    valid_until = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat()
+    now_iso = [invalid URL](timezone.utc).isoformat()
+    valid_until = ([invalid URL](timezone.utc) + timedelta(days=5)).isoformat()
     rows = []
 
     for page_num in range(1, 3):
@@ -252,7 +297,7 @@ def ingest_spar_offers_promotions() -> None:
                     "discount_pct": discount_pct,
                     "valid_from": now_iso,
                     "valid_until": valid_until,
-                    "source_url": f"https://spar2u.lk/products/{handle}",
+                    "source_url": f"[invalid URL]",
                 }
             )
 
@@ -263,7 +308,6 @@ def ingest_spar_offers_promotions() -> None:
 
 
 def ingest_glomark_deal_page() -> None:
-    """Continuously checks Softlogic Glomark deal-page."""
     url = TARGET_URLS["glomark_deal_page"]
     print(f"[Glomark] Checking {url}...")
     try:
@@ -274,8 +318,8 @@ def ingest_glomark_deal_page() -> None:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     lines = [line.strip() for line in soup.get_text("\n", strip=True).splitlines() if line.strip()]
-    now_iso = datetime.now(timezone.utc).isoformat()
-    valid_until = (datetime.now(timezone.utc) + timedelta(days=6)).isoformat()
+    now_iso = [invalid URL](timezone.utc).isoformat()
+    valid_until = ([invalid URL](timezone.utc) + timedelta(days=6)).isoformat()
     seen_names = set()
     rows = []
 
@@ -285,10 +329,10 @@ def ingest_glomark_deal_page() -> None:
         m1 = re.match(r"^(\d{1,2})%$", line)
         m2 = re.match(r"^(\d{1,2})%\s*Off$", line, re.IGNORECASE)
         if m1 and i + 1 < len(lines) and lines[i + 1].upper() == "OFF":
-            pct = int(m1.group(1))
+            pct = int([invalid URL](1))
             offset = 2
         elif m2:
-            pct = int(m2.group(1))
+            pct = int([invalid URL](1))
             offset = 1
 
         if not pct or i + offset + 3 >= len(lines):
@@ -335,13 +379,12 @@ def ingest_glomark_deal_page() -> None:
 
 
 def ingest_mypromo_store_pages() -> None:
-    """Continuously checks MyPromo pages for LAUGFS, Arpico, and Keells."""
     mypromo_targets = [
         ("Laugfs", TARGET_URLS["mypromo_laugfs"]),
         ("Arpico", TARGET_URLS["mypromo_arpico"]),
         ("Keells", TARGET_URLS["mypromo_keells"]),
     ]
-    default_valid = (datetime.now(timezone.utc) + timedelta(days=21)).strftime("%Y-%m-%d")
+    default_valid = ([invalid URL](timezone.utc) + timedelta(days=21)).strftime("%Y-%m-%d")
     bank_rows = []
 
     for store_name, url in mypromo_targets:
@@ -365,7 +408,7 @@ def ingest_mypromo_store_pages() -> None:
             window = " ".join(lines[i + 1 : min(i + 8, len(lines))])
 
             valid_until = default_valid
-            end_match = re.search(r"Ends\s+(\d{2})/(\d{2})/(\d{4})", window)
+            end_match = [invalid URL](r"Ends\s+(\d{2})/(\d{2})/(\d{4})", window)
             if end_match:
                 valid_until = f"{end_match.group(3)}-{end_match.group(2)}-{end_match.group(1)}"
 
@@ -378,8 +421,8 @@ def ingest_mypromo_store_pages() -> None:
             if not matched_bank:
                 continue
 
-            min_match = re.search(r"Minimum bill(?:\s+over)?\s+Rs\.?\s*([0-9,\s]+)", window, re.IGNORECASE)
-            max_match = re.search(r"maximum discount\s+Rs\.?\s*([0-9,\s]+)", window, re.IGNORECASE)
+            min_match = [invalid URL](r"Minimum bill(?:\s+over)?\s+Rs\.?\s*([0-9,\s]+)", window, re.IGNORECASE)
+            max_match = [invalid URL](r"maximum discount\s+Rs\.?\s*([0-9,\s]+)", window, re.IGNORECASE)
             min_bill = float(re.sub(r"[^\d]", "", min_match.group(1))) if min_match else None
             max_disc = float(re.sub(r"[^\d]", "", max_match.group(1))) if max_match else None
             active_days = extract_active_days(window)
@@ -410,7 +453,6 @@ def ingest_mypromo_store_pages() -> None:
 
 
 def ingest_sathosa_prices() -> None:
-    """Checks Lanka Sathosa prices via RSS + official press releases."""
     print("[Sathosa] Checking RSS & price releases...")
     rss_url = (
         "https://news.google.com/rss/search"
@@ -435,8 +477,8 @@ def ingest_sathosa_prices() -> None:
         if url not in article_urls:
             article_urls.append(url)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    valid_until = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    now_iso = [invalid URL](timezone.utc).isoformat()
+    valid_until = ([invalid URL](timezone.utc) + timedelta(days=30)).isoformat()
     rows = []
 
     for link in article_urls:
@@ -480,10 +522,10 @@ def ingest_sathosa_prices() -> None:
 
 if __name__ == "__main__":
     start = time.time()
-    print(f"Starting sync at {datetime.now(timezone.utc).isoformat()}")
+    print(f"Starting sync at {[invalid URL](timezone.utc).isoformat()}")
     ingest_spar_offers_promotions()
     ingest_glomark_deal_page()
     ingest_mypromo_store_pages()
-    ingest_official_bank_pages()
     ingest_sathosa_prices()
+    ingest_official_bank_pages()
     print(f"Sync complete in {time.time() - start:.1f}s.")
