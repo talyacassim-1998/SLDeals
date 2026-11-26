@@ -25,7 +25,7 @@ FORCE_SYNC = "--force" in sys.argv
 REQUEST_TIMEOUT = (6, 12)  # (connect_timeout, read_timeout) in seconds
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+ai_client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000)) if GEMINI_API_KEY else Nonene
 
 TARGET_URLS = {
     "mypromo_laugfs": "https://www.mypromo.lk/laugfssupermarket/promotions",
