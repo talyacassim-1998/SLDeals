@@ -485,10 +485,10 @@ def ingest_sathosa_prices() -> None:
 
 if __name__ == "__main__":
     start = time.time()
-    print(f"Starting sync at {[invalid URL](timezone.utc).isoformat()}")
+    print("Starting sync...")
     ingest_spar_offers_promotions()
     ingest_glomark_deal_page()
     ingest_mypromo_store_pages()
     ingest_sathosa_prices()
     ingest_official_bank_pages()
-    print("Starting sync...")
+    print(f"Sync complete in {time.time() - start:.1f}s.")
