@@ -9,16 +9,14 @@ on:
 jobs:
   scrape-and-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies & headless browser
-        run: |
-          pip install supabase google-genai requests beautifulsoup4 playwright
-          playwright install --with-deps chromium
+      - name: Install dependencies
+        run: pip install supabase google-genai requests beautifulsoup4
       - name: Run ingestion pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
